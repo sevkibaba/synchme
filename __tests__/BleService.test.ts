@@ -3,20 +3,28 @@ import bluetooth from 'munim-bluetooth';
 
 describe('BleService', () => {
   describe('encodeMessage / decodeMessage', () => {
-    it('encodes PLAY correctly', () => {
-      expect(encodeMessage({ action: 'PLAY' })).toBe('01');
+    it('encodes PLAY and time correctly', () => {
+      // PLAY:1.5 -> hex
+      const encoded = encodeMessage({ action: 'PLAY', time: 1.5 });
+      expect(encoded).toBeTruthy();
+      
+      const decoded = decodeMessage(encoded);
+      expect(decoded.action).toBe('PLAY');
+      expect(decoded.time).toBe(1.5);
     });
 
-    it('encodes PAUSE correctly', () => {
-      expect(encodeMessage({ action: 'PAUSE' })).toBe('00');
+    it('encodes PAUSE and time correctly', () => {
+      const encoded = encodeMessage({ action: 'PAUSE', time: 0 });
+      const decoded = decodeMessage(encoded);
+      expect(decoded.action).toBe('PAUSE');
+      expect(decoded.time).toBe(0);
     });
 
-    it('decodes 01 to PLAY', () => {
-      expect(decodeMessage('01').action).toBe('PLAY');
-    });
-
-    it('decodes 00 to PAUSE', () => {
-      expect(decodeMessage('00').action).toBe('PAUSE');
+    it('encodes RESET and time correctly', () => {
+      const encoded = encodeMessage({ action: 'RESET', time: 0 });
+      const decoded = decodeMessage(encoded);
+      expect(decoded.action).toBe('RESET');
+      expect(decoded.time).toBe(0);
     });
   });
 

@@ -46,7 +46,9 @@ jest.mock('munim-bluetooth', () => {
     addEventListener: jest.fn((event, callback) => {
       if (!listeners[event]) listeners[event] = [];
       listeners[event].push(callback);
-      return { remove: () => {} };
+      return () => {
+        listeners[event] = listeners[event].filter(cb => cb !== callback);
+      };
     }),
     requestBluetoothPermission: jest.fn(() => Promise.resolve(true)),
     getBluetoothStateAsync: jest.fn(() => Promise.resolve('PoweredOn')),

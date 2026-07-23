@@ -11,6 +11,14 @@
       "infoPlist": {
         "UIBackgroundModes": [
           "audio"
+        ],
+        "LSApplicationQueriesSchemes": [
+          "App-Prefs"
+        ],
+        "NSLocalNetworkUsageDescription": "App requires local network access to find other Ableton Link devices.",
+        "NSBonjourServices": [
+          "_ableton-link._udp",
+          "_ableton-link._tcp"
         ]
       },
       "bundleIdentifier": "com.soyante.synchme"
@@ -30,8 +38,13 @@
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_ADVERTISE",
         "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
-      ]
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
+      "package": "com.soyante.synchme"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -41,7 +54,11 @@
         "munim-bluetooth",
         {
           "bluetoothBackground": true,
-          "androidBluetoothPermissions": ["scan", "connect", "advertise"],
+          "androidBluetoothPermissions": [
+            "scan",
+            "connect",
+            "advertise"
+          ],
           "bluetoothAlwaysUsageDescription": "Allow SynchMe to connect to nearby devices to sync audio playback."
         }
       ],
