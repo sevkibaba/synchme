@@ -1,24 +1,94 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Button, FlatList, ActivityIndicator, TextInput } from 'react-native';
-import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
-import { usePcmPlayer as useAudioPlayer } from '../../modules/synchme-pcm-player';
-import { ScreenType } from '../../App';
-import { startGuestScanning, stopGuestScanning, connectToHost, disconnectFromHost, requestSongFromHost, pingHost, sendReadyToHost, requestSyncFromHost, BluetoothDevice, SyncMessage } from '../services/BleService';
+import { readPlaybackSnapshot, songKey } from "../services/PlaybackSync";
+import React, { useState, useEffect, useRef } from "react";
+import {
+  StyleSheet,
+  View,
+  Text,
+  TouchableOpacity,
+  Button,
+  FlatList,
+  ScrollView,
+  ActivityIndicator,
+  TextInput,
+} from "react-native";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import { usePcmPlayer as useAudioPlayer } from "../../modules/synchme-pcm-player";
+import { ScreenType } from "../../App";
+import {
+  startGuestScanning,
+  stopGuestScanning,
+  connectToHost,
+  disconnectFromHost,
+  requestSongFromHost,
+  pingHost,
+  sendReadyToHost,
+  requestSyncFromHost,
+  consumePong,
+  BluetoothDevice,
+  SyncMessage,
+} from "../services/BleService";
 
 interface Props {
   onNavigate: (screen: ScreenType) => void;
 }
 
 export default function GuestScreen({ onNavigate }: Props) {
-  const [audioFile, setAudioFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const alive = useRef(true);
+  const sourceRef = useRef<string | null>(null);
+  const downloadingRef = useRef<string | null>(null);
+  const downloadGeneration = useRef(0);
+  const playTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const playbackGeneration = useRef(0);
+  const pendingSnapshot = useRef<{ id: string; sentAt: number } | null>(null);
+  const snapshotRetry = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [joinStatus, setJoinStatus] = useState("");
+  const cancelPlay = () => {
+    playbackGeneration.current++;
+    if (playTimer.current) clearTimeout(playTimer.current);
+    playTimer.current = null;
+  };
+  const stopSnapshotRequests = () => {
+    pendingSnapshot.current = null;
+    if (snapshotRetry.current) clearInterval(snapshotRetry.current);
+    snapshotRetry.current = null;
+  };
+  const requestCurrentPlayback = () => {
+    const host = connectedHostIdRef.current;
+    if (!host || !sourceRef.current || !playerRef.current.isLoaded) return;
+    stopSnapshotRequests();
+    setJoinStatus("Joining the current track…");
+    let attempts = 0;
+    const request = () => {
+      if (!alive.current) return;
+      if (attempts++ >= 5) {
+        stopSnapshotRequests();
+        setJoinStatus("Could not sync with the DJ. Tap to retry.");
+        return;
+      }
+      const id =
+        Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      pendingSnapshot.current = { id, sentAt: Date.now() };
+      requestSyncFromHost(host, id).catch(() => {
+        /* Retried with a new correlation ID. */
+      });
+    };
+    snapshotRetry.current = setInterval(request, 2000);
+    request();
+  };
+  const [audioFile, setAudioFile] =
+    useState<DocumentPicker.DocumentPickerAsset | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [discoveredHosts, setDiscoveredHosts] = useState<BluetoothDevice[]>([]);
   const [connectedHostId, setConnectedHostId] = useState<string | null>(null);
   const [clockOffset, setClockOffset] = useState<number | null>(null);
   const clockOffsetRef = useRef(clockOffset);
-  const [nudgeSuggestion, setNudgeSuggestion] = useState<'forward' | 'backward' | 'synced' | null>(null);
+  const [nudgeSuggestion, setNudgeSuggestion] = useState<
+    "forward" | "backward" | "synced" | null
+  >(null);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const syncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const periodicPingCountRef = useRef(0);
@@ -26,31 +96,35 @@ export default function GuestScreen({ onNavigate }: Props) {
   const startPeriodicPing = (deviceId: string) => {
     if (syncIntervalRef.current) clearInterval(syncIntervalRef.current);
     periodicPingCountRef.current = 0;
-    
+
     // Start with 2 seconds period
     syncIntervalRef.current = setInterval(() => {
-      pingHost(deviceId).catch(()=>{});
+      pingHost(deviceId).catch(() => {});
       periodicPingCountRef.current += 1;
-      
+
       // After 2 times, switch to 30 seconds
       if (periodicPingCountRef.current >= 2) {
         clearInterval(syncIntervalRef.current!);
         addLog("Switching to 30s ping interval.");
         syncIntervalRef.current = setInterval(() => {
-          pingHost(deviceId).catch(()=>{});
+          pingHost(deviceId).catch(() => {});
         }, 30000);
       }
     }, 2000);
   };
 
   const addLog = (log: string) => {
-    setDebugLogs(prev => [log, ...prev].slice(0, 10)); // keep last 10 logs
+    setDebugLogs((prev) => [log, ...prev].slice(0, 10)); // keep last 10 logs
   };
-  
+
   const player = useAudioPlayer(audioFile ? { uri: audioFile.uri } : null);
   const playerRef = useRef(player);
   const audioFileRef = useRef(audioFile);
-  const lastSyncRef = useRef<{ hostTime: number; localTimeAtSync: number; isPlaying: boolean } | null>(null);
+  const lastSyncRef = useRef<{
+    hostTime: number;
+    localTimeAtSync: number;
+    isPlaying: boolean;
+  } | null>(null);
   // Accumulated manual nudge offset (survives SYNC messages from host)
   const nudgeOffsetRef = useRef<number>(0);
 
@@ -61,7 +135,12 @@ export default function GuestScreen({ onNavigate }: Props) {
   }, [player, audioFile, clockOffset]);
 
   useEffect(() => {
+    alive.current = true;
     return () => {
+      alive.current = false;
+      downloadGeneration.current++;
+      cancelPlay();
+      stopSnapshotRequests();
       stopGuestScanning();
       if (syncIntervalRef.current) clearInterval(syncIntervalRef.current);
       if (connectedHostIdRef.current) {
@@ -76,12 +155,22 @@ export default function GuestScreen({ onNavigate }: Props) {
   }, [connectedHostId]);
 
   useEffect(() => {
-    if (audioFile && connectedHostId) {
+    if (
+      audioFile &&
+      connectedHostId &&
+      player.isLoaded &&
+      player.loadedUri === audioFile.uri
+    ) {
       sendReadyToHost(connectedHostId);
+      requestCurrentPlayback();
     }
-  }, [audioFile, connectedHostId]);
+    return stopSnapshotRequests;
+  }, [audioFile?.uri, connectedHostId, player.isLoaded, player.loadedUri]);
 
-
+  useEffect(() => {
+    if (player.loadError)
+      setJoinStatus("Could not load this track. Reconnect to try again.");
+  }, [player.loadError]);
 
   // Removed manual pickDocument
 
@@ -91,117 +180,161 @@ export default function GuestScreen({ onNavigate }: Props) {
     if (connectedHostIdRef.current || isConnectingRef.current) return; // Already connected/connecting
     setIsScanning(true);
     setDiscoveredHosts([]);
-    await startGuestScanning((device) => {
-      setDiscoveredHosts((prev) => {
-        if (prev.find(d => d.id === device.id)) return prev;
-        return [...prev, device];
+    setScanError(null);
+    try {
+      await startGuestScanning((device) => {
+        setDiscoveredHosts((prev) => {
+          if (prev.find((d) => d.id === device.id)) return prev;
+          return [...prev, device];
+        });
       });
-    });
+    } catch {
+      setIsScanning(false);
+      setScanError(
+        "Bluetooth is unavailable. Turn it on and try again. Nearby discovery requires a physical phone.",
+      );
+    }
   };
 
   // Auto-scan when screen mounts
   useEffect(() => {
     const timer = setTimeout(() => handleScan(), 500);
     return () => clearTimeout(timer);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
 
   const downloadSong = async (url: string, filename: string) => {
+    const source = `FIREBASE|${url}|${filename}`;
+    // A SONG reply for a new listener is broadcast: existing listeners must not reload.
+    if (
+      sourceRef.current === source &&
+      (downloadingRef.current === source || audioFileRef.current)
+    )
+      return;
+    const generation = ++downloadGeneration.current;
+    sourceRef.current = source;
+    downloadingRef.current = source;
+    cancelPlay();
+    stopSnapshotRequests();
+    playerRef.current.pause();
+    lastSyncRef.current = null;
+    audioFileRef.current = null;
+    setAudioFile(null);
+    setJoinStatus("Downloading the current track…");
     setIsDownloading(true);
     setDownloadProgress(0);
+    const current = () =>
+      alive.current && generation === downloadGeneration.current;
+    const extension = filename.match(/\.[a-zA-Z0-9]{1,8}$/)?.[0] || ".mp3";
+    const fileUri = `${FileSystem.cacheDirectory}party-${songKey(source)}${extension}`;
+    const partial = `${fileUri}.${generation}.part`;
     try {
-      const fileUri = FileSystem.cacheDirectory + filename;
-      
-      
-      const fileInfo = await FileSystem.getInfoAsync(fileUri);
-      let size = 0;
-      
-      if (fileInfo.exists) {
-        
-        size = fileInfo.size || 0;
-      } else {
-        
-        
-        const downloadResumable = FileSystem.createDownloadResumable(
+      const info = await FileSystem.getInfoAsync(fileUri);
+      if (!current()) return;
+      if (!info.exists || !info.size) {
+        const task = FileSystem.createDownloadResumable(
           url,
-          fileUri,
+          partial,
           {},
-          (downloadProgress) => {
-            const progress = (downloadProgress.totalBytesWritten / downloadProgress.totalBytesExpectedToWrite) * 100;
-            setDownloadProgress(progress);
-            
-          }
+          (progress) => {
+            if (current())
+              setDownloadProgress(
+                progress.totalBytesExpectedToWrite > 0
+                  ? (100 * progress.totalBytesWritten) /
+                      progress.totalBytesExpectedToWrite
+                  : 0,
+              );
+          },
         );
-
-        const result = await downloadResumable.downloadAsync();
-        if (!result) throw new Error('Download failed completely');
-        
-      
-      size = result.status === 200 ? parseInt(result.headers['Content-Length'] || '0', 10) || 0 : 0;
+        const result = await task.downloadAsync();
+        if (!current()) return;
+        if (!result || result.status !== 200)
+          throw new Error("Download failed");
+        const downloaded = await FileSystem.getInfoAsync(partial);
+        if (!downloaded.exists || !downloaded.size)
+          throw new Error("Empty download");
+        await FileSystem.moveAsync({ from: partial, to: fileUri });
       }
-      
-      setAudioFile({
+      if (!current()) return;
+      const file = {
         uri: fileUri,
         name: filename,
-        mimeType: 'audio/mpeg',
-        size: size
-      } as DocumentPicker.DocumentPickerAsset);
-      
-      
-    } catch (e: any) {
-      
-      alert(`Failed to download song automatically: ${e.message}. Please select it manually.`);
+        mimeType: "audio/mpeg",
+        lastModified: Date.now(),
+      };
+      audioFileRef.current = file;
+      setAudioFile(file);
+      setJoinStatus("Preparing your player…");
+    } catch {
+      if (current()) setJoinStatus("Download failed. Tap to retry.");
     } finally {
-      setIsDownloading(false);
-      setDownloadProgress(0);
+      FileSystem.deleteAsync(partial, { idempotent: true }).catch(() => {});
+      if (current()) {
+        downloadingRef.current = null;
+        setIsDownloading(false);
+        setDownloadProgress(0);
+      }
     }
   };
 
   const handleConnect = async (deviceId: string) => {
+    if (isConnectingRef.current || connectedHostIdRef.current) return;
+    isConnectingRef.current = true;
     try {
       let pingResults: { rtt: number; offset: number }[] = [];
 
       await connectToHost(
-        deviceId, 
+        deviceId,
         async (msg: SyncMessage) => {
+          if (!alive.current) return;
           const currentPlayer = playerRef.current;
           const currentFile = audioFileRef.current;
           const currentOffset = clockOffsetRef.current;
-          
-          if (msg.action === 'PONG') {
+
+          if (msg.action === "PONG") {
+            if (!consumePong(msg.time)) return;
             const guestSendTime = msg.time;
-            const [hostDateNowStr, hostAudioTimeStr] = (msg.name || '0|0').split('|');
+            const [hostDateNowStr, hostAudioTimeStr] = (
+              msg.name || "0|0"
+            ).split("|");
             const hostDateNow = parseFloat(hostDateNowStr);
-            const hostAudioTime = parseFloat(hostAudioTimeStr || '0');
-            
+            const hostAudioTime = parseFloat(hostAudioTimeStr || "0");
+
             const rtt = Date.now() - guestSendTime;
-            const offset = hostDateNow - (Date.now() - (rtt / 2));
-            
+            const offset = hostDateNow - (Date.now() - rtt / 2);
+
             pingResults.push({ rtt, offset });
-            
+
             // Eagerly set offset on the first ping so it's never null!
             if (pingResults.length === 1) {
-                setClockOffset(offset);
+              setClockOffset(offset);
             }
-            
+
             if (pingResults.length < 3) {
               setTimeout(async () => {
-                 let err = await pingHost(deviceId);
-                 if (err) {
-                    addLog(`PING ${pingResults.length + 1} FAILED: ${err}. Retrying in 500ms...`);
-                    setTimeout(async () => {
-                        const retryErr = await pingHost(deviceId);
-                        if (retryErr) addLog(`PING ${pingResults.length + 1} RETRY FAILED: ${retryErr}`);
-                    }, 500);
-                 }
+                let err = await pingHost(deviceId);
+                if (err) {
+                  addLog(
+                    `PING ${pingResults.length + 1} FAILED: ${err}. Retrying in 500ms...`,
+                  );
+                  setTimeout(async () => {
+                    const retryErr = await pingHost(deviceId);
+                    if (retryErr)
+                      addLog(
+                        `PING ${pingResults.length + 1} RETRY FAILED: ${retryErr}`,
+                      );
+                  }, 500);
+                }
               }, 300);
               return;
             } else if (pingResults.length === 3) {
               pingResults.sort((a, b) => a.rtt - b.rtt);
               const bestPings = pingResults.slice(0, 2);
-              const avgOffset = bestPings.reduce((sum, p) => sum + p.offset, 0) / bestPings.length;
+              const avgOffset =
+                bestPings.reduce((sum, p) => sum + p.offset, 0) /
+                bestPings.length;
               setClockOffset(avgOffset);
               addLog(`PING BURST DONE! Offset: ${avgOffset.toFixed(1)}ms`);
               startPeriodicPing(deviceId);
@@ -210,140 +343,227 @@ export default function GuestScreen({ onNavigate }: Props) {
 
             // Periodic PONG handling (length > 3)
             // Gently adjust clock offset
-            setClockOffset(prev => prev !== null ? (prev * 0.9 + offset * 0.1) : offset);
+            setClockOffset((prev) =>
+              prev !== null ? prev * 0.9 + offset * 0.1 : offset,
+            );
 
-            if (lastSyncRef.current && lastSyncRef.current.isPlaying) {
+            if (
+              currentPlayer.isLoaded &&
+              !pendingSnapshot.current &&
+              lastSyncRef.current &&
+              lastSyncRef.current.isPlaying
+            ) {
               const transitTime = rtt / 2;
-              const trueHostTime = hostAudioTime + (transitTime / 1000);
+              const trueHostTime = hostAudioTime + transitTime / 1000;
               const targetGuestPos = trueHostTime + nudgeOffsetRef.current;
-              const diffMs = (targetGuestPos - currentPlayer.currentTime) * 1000;
+              const diffMs =
+                (targetGuestPos - currentPlayer.currentTime) * 1000;
               const timeSinceNudge = Date.now() - lastNudgeTimeRef.current;
-              
+
               const isDrifting = Math.abs(diffMs) > 2; // Auto correct if drift > 2ms
               const canSteer = timeSinceNudge > 2000 && !isSeekingRef.current;
 
               if (isDrifting && canSteer) {
                 isSeekingRef.current = true;
                 const EXTRA_FORWARD_BUFFER_SECS = 0.05;
-                const compensationSecs = (lastSeekComputeDelayRef.current / 1000) + EXTRA_FORWARD_BUFFER_SECS;
-                const compensatedTarget = Math.max(0, targetGuestPos + compensationSecs);
-                
+                const compensationSecs =
+                  lastSeekComputeDelayRef.current / 1000 +
+                  EXTRA_FORWARD_BUFFER_SECS;
+                const compensatedTarget = Math.max(
+                  0,
+                  targetGuestPos + compensationSecs,
+                );
+
                 const steerStart = Date.now();
-                currentPlayer.seekTo(compensatedTarget).finally(() => { 
-                    isSeekingRef.current = false;
-                    const steerTimeMs = Date.now() - steerStart;
-                    addLog(`[AUTO-SYNC] DRIFT: ${diffMs.toFixed(1)}ms! ⚠️ Corrected. (RTT: ${rtt}ms)`);
+                currentPlayer.seekTo(compensatedTarget).finally(() => {
+                  isSeekingRef.current = false;
+                  const steerTimeMs = Date.now() - steerStart;
+                  addLog(
+                    `[AUTO-SYNC] DRIFT: ${diffMs.toFixed(1)}ms! ⚠️ Corrected. (RTT: ${rtt}ms)`,
+                  );
                 });
-                setNudgeSuggestion('synced');
+                setNudgeSuggestion("synced");
               } else {
-                addLog(`[SYNC-CHECK] Drift: ${diffMs.toFixed(1)}ms ✅ (RTT: ${rtt}ms)`);
+                addLog(
+                  `[SYNC-CHECK] Drift: ${diffMs.toFixed(1)}ms ✅ (RTT: ${rtt}ms)`,
+                );
                 if (timeSinceNudge < 1500) {
-                  setNudgeSuggestion('synced');
+                  setNudgeSuggestion("synced");
                 } else {
                   if (diffMs > 1) {
-                    setNudgeSuggestion('forward');
+                    setNudgeSuggestion("forward");
                   } else if (diffMs < -1) {
-                    setNudgeSuggestion('backward');
+                    setNudgeSuggestion("backward");
                   } else {
-                    setNudgeSuggestion('synced');
+                    setNudgeSuggestion("synced");
                   }
                 }
               }
             }
             return;
           }
-          if (msg.action === 'SONG' && msg.name) {
-            
-            
-            if (msg.name.startsWith('FIREBASE|')) {
+          if (msg.action === "SONG" && msg.name) {
+            if (msg.name.startsWith("FIREBASE|")) {
               // Firebase payload format: FIREBASE|URL|FILENAME
-              const parts = msg.name.split('|');
+              const parts = msg.name.split("|");
               const url = parts[1];
-              const actualFilename = parts[2];
-              
-              if (!currentFile || currentFile.name !== actualFilename) {
-                
-                await downloadSong(url, actualFilename);
-              } else {
-                
-              }
+              const actualFilename = parts.slice(2).join("|");
+
+              await downloadSong(url, actualFilename);
             } else {
               // Legacy fallback logic
-              const [ip, filename] = msg.name.split('|');
+              const [ip, filename] = msg.name.split("|");
               const actualFilename = filename || msg.name;
-              
+
               if (!currentFile || currentFile.name !== actualFilename) {
-                alert(`Host changed the song to: ${actualFilename}. Please select the exact same file!`);
+                alert(
+                  `Host changed the song to: ${actualFilename}. Please select the exact same file!`,
+                );
               }
             }
             return;
           }
 
-          try {
-            if (msg.action === 'PLAY' && currentPlayer) {
-              const executeAtHost = parseFloat(msg.name || '0');
-              if (executeAtHost > 0 && currentOffset !== null) {
-                const executeAtGuest = executeAtHost - currentOffset;
-                lastSyncRef.current = { hostTime: msg.time, localTimeAtSync: executeAtGuest, isPlaying: true };
-                const waitTime = executeAtGuest - Date.now();
-                
-                const schedulePlay = () => {
-                   const now = Date.now();
-                   const elapsedSinceStart = (now - executeAtGuest) / 1000;
-                   const targetTime = msg.time + Math.max(0, elapsedSinceStart);
-                   
-                   currentPlayer.seekTo(targetTime).then(() => {
-                       currentPlayer.play();
-                       addLog(`Started PLAY. Target: ${targetTime.toFixed(3)}s (Wait: ${waitTime.toFixed(0)}ms, Elapsed: ${(elapsedSinceStart*1000).toFixed(0)}ms)`);
-                   });
-                };
-
-                if (waitTime > 10) {
-                  setTimeout(schedulePlay, waitTime);
-                } else {
-                  schedulePlay();
-                }
-              } else {
-                lastSyncRef.current = { hostTime: msg.time, localTimeAtSync: Date.now(), isPlaying: true };
-                currentPlayer.play();
-                addLog(`Started PLAY immediately. No ping offset available!`);
+          if (msg.action === "SYNC") {
+            const pending = pendingSnapshot.current;
+            const source = sourceRef.current;
+            if (!pending || !source || !currentPlayer.isLoaded) return;
+            const snapshot = readPlaybackSnapshot(msg, pending.id, source);
+            if (!snapshot) {
+              // The DJ may have changed tracks while this phone was downloading.
+              if (msg.name?.startsWith(pending.id + "|")) {
+                stopSnapshotRequests();
+                requestSongFromHost(deviceId);
               }
-            } else if (msg.action === 'PAUSE' && currentPlayer) {
-              if (msg.time !== undefined) {
-                await currentPlayer.seekTo(msg.time);
-              }
-              lastSyncRef.current = { hostTime: msg.time, localTimeAtSync: Date.now(), isPlaying: false };
-              currentPlayer.pause();
-            } else if (msg.action === 'RESET' && currentPlayer) {
-              lastSyncRef.current = { hostTime: 0, localTimeAtSync: Date.now(), isPlaying: false };
-              currentPlayer.pause();
-              await currentPlayer.seekTo(0);
+              return;
             }
-          } catch (err) {
+            const receivedAt = Date.now();
+            const elapsed =
+              currentOffset === null
+                ? Math.max(0, receivedAt - pending.sentAt) / 2000
+                : (receivedAt + currentOffset - snapshot.sampledAt) / 1000;
+            stopSnapshotRequests();
+            cancelPlay();
+            const generation = playbackGeneration.current;
+            const start = async () => {
+              if (
+                !alive.current ||
+                generation !== playbackGeneration.current ||
+                sourceRef.current !== source
+              )
+                return;
+              try {
+                const position =
+                  snapshot.position +
+                  (snapshot.playing
+                    ? Math.max(0, elapsed + (Date.now() - receivedAt) / 1000)
+                    : 0);
+                currentPlayer.pause();
+                await currentPlayer.seekTo(position);
+                if (!alive.current || generation !== playbackGeneration.current)
+                  return;
+                if (snapshot.playing) currentPlayer.play();
+                lastSyncRef.current = {
+                  hostTime: position,
+                  localTimeAtSync: Date.now(),
+                  isPlaying: snapshot.playing,
+                };
+                setJoinStatus(
+                  snapshot.playing
+                    ? "You’re in! Playing with the DJ."
+                    : "Ready — waiting for the DJ to play.",
+                );
+              } catch {
+                if (alive.current)
+                  setJoinStatus("Could not sync with the DJ. Tap to retry.");
+              }
+            };
+            playTimer.current = setTimeout(
+              () => {
+                void start();
+              },
+              snapshot.playing ? Math.max(0, -elapsed * 1000) : 0,
+            );
+            return;
           }
+          if (!["PLAY", "PAUSE", "RESET"].includes(msg.action)) return;
+          cancelPlay();
+          // Missed commands are recovered by the snapshot requested after native load completes.
+          if (!currentPlayer.isLoaded || !currentFile || downloadingRef.current)
+            return;
+          stopSnapshotRequests();
+          const generation = playbackGeneration.current;
+          const executeAt =
+            msg.action === "PLAY" &&
+            Number(msg.name) > 0 &&
+            currentOffset !== null
+              ? Number(msg.name) - currentOffset
+              : Date.now();
+          const apply = async () => {
+            if (!alive.current || generation !== playbackGeneration.current)
+              return;
+            try {
+              const position =
+                msg.action === "RESET"
+                  ? 0
+                  : msg.time +
+                    (msg.action === "PLAY"
+                      ? Math.max(0, (Date.now() - executeAt) / 1000)
+                      : 0);
+              currentPlayer.pause();
+              await currentPlayer.seekTo(position);
+              if (!alive.current || generation !== playbackGeneration.current)
+                return;
+              if (msg.action === "PLAY") currentPlayer.play();
+              lastSyncRef.current = {
+                hostTime: position,
+                localTimeAtSync: Date.now(),
+                isPlaying: msg.action === "PLAY",
+              };
+              setJoinStatus(
+                msg.action === "PLAY"
+                  ? "You’re in! Playing with the DJ."
+                  : "Ready — waiting for the DJ to play.",
+              );
+            } catch {
+              if (alive.current)
+                setJoinStatus("Could not sync with the DJ. Tap to retry.");
+            }
+          };
+          playTimer.current = setTimeout(
+            () => {
+              void apply();
+            },
+            Math.max(0, executeAt - Date.now()),
+          );
         },
         async (hostSongPayload) => {
+          if (!alive.current) {
+            disconnectFromHost(deviceId);
+            return;
+          }
+          connectedHostIdRef.current = deviceId;
+          setConnectedHostId(deviceId);
           const currentFile = audioFileRef.current;
           if (hostSongPayload) {
-            
-            if (hostSongPayload.startsWith('FIREBASE|')) {
-              const parts = hostSongPayload.split('|');
+            if (hostSongPayload.startsWith("FIREBASE|")) {
+              const parts = hostSongPayload.split("|");
               const url = parts[1];
-              const actualFilename = parts[2];
-              
-              if (!currentFile || currentFile.name !== actualFilename) {
-                await downloadSong(url, actualFilename);
-              }
+              const actualFilename = parts.slice(2).join("|");
+
+              await downloadSong(url, actualFilename);
             } else {
-               const [ip, filename] = hostSongPayload.split('|');
-               const actualFilename = filename || hostSongPayload;
-               if (!currentFile || currentFile.name !== actualFilename) {
-                  alert(`The Host is playing: ${actualFilename}. Please select the exact same file to sync properly!`);
-               }
-             }
+              const [ip, filename] = hostSongPayload.split("|");
+              const actualFilename = filename || hostSongPayload;
+              if (!currentFile || currentFile.name !== actualFilename) {
+                alert(
+                  `The Host is playing: ${actualFilename}. Please select the exact same file to sync properly!`,
+                );
+              }
+            }
           }
           addLog("Connected! Sending initial PING...");
-          
+
           // Retry logic for initial ping in case services are still resolving
           let attempts = 0;
           while (attempts < 3) {
@@ -354,22 +574,28 @@ export default function GuestScreen({ onNavigate }: Props) {
             }
             attempts++;
             addLog(`Initial PING failed (attempt ${attempts}): ${err}`);
-            if (attempts < 3) await new Promise(r => setTimeout(r, 500));
+            if (attempts < 3) await new Promise((r) => setTimeout(r, 500));
           }
-          
+
           if (!hostSongPayload) {
-             // If we connected late and the Host was broadcasting SYNC instead of SONG,
-             // we need to explicitly ask the Host to broadcast the SONG again.
-             
-             await requestSongFromHost(deviceId);
+            // If we connected late and the Host was broadcasting SYNC instead of SONG,
+            // we need to explicitly ask the Host to broadcast the SONG again.
+
+            await requestSongFromHost(deviceId);
           }
-        }
+        },
       );
+      if (!alive.current) {
+        disconnectFromHost(deviceId);
+        return;
+      }
       setConnectedHostId(deviceId);
       setIsScanning(false);
       isConnectingRef.current = false;
     } catch (err: any) {
       isConnectingRef.current = false;
+      connectedHostIdRef.current = null;
+      setConnectedHostId(null);
       alert(`Failed to connect: ${err.message || err}`);
     }
   };
@@ -391,23 +617,29 @@ export default function GuestScreen({ onNavigate }: Props) {
     nudgeOffsetRef.current += offsetSecs;
 
     // Compute TRUE host position at press time
-    const elapsedSinceSync = (pressTime - lastSyncRef.current.localTimeAtSync) / 1000;
+    const elapsedSinceSync =
+      (pressTime - lastSyncRef.current.localTimeAtSync) / 1000;
     const trueHostPos = lastSyncRef.current.hostTime + elapsedSinceSync;
-    
+
     // Target position for Guest includes accumulated nudgeOffset and CPU/hardware compensation
     const EXTRA_FORWARD_BUFFER_SECS = 0.05;
-    const compensationSecs = (lastSeekComputeDelayRef.current / 1000) + EXTRA_FORWARD_BUFFER_SECS;
-    const targetPos = Math.max(0, trueHostPos + nudgeOffsetRef.current + compensationSecs);
+    const compensationSecs =
+      lastSeekComputeDelayRef.current / 1000 + EXTRA_FORWARD_BUFFER_SECS;
+    const targetPos = Math.max(
+      0,
+      trueHostPos + nudgeOffsetRef.current + compensationSecs,
+    );
 
     const posBefore = player.currentTime;
 
     try {
       const seekStart = performance.now();
-      await player.seekTo(targetPos, 0, 0); // sub-ms precision
+      await player.seekTo(targetPos);
       const actualFreeze = performance.now() - seekStart;
 
       // Update moving average for this device's seekTo cost
-      lastSeekComputeDelayRef.current = lastSeekComputeDelayRef.current * 0.7 + actualFreeze * 0.3;
+      lastSeekComputeDelayRef.current =
+        lastSeekComputeDelayRef.current * 0.7 + actualFreeze * 0.3;
 
       // Update lastSyncRef with TRUE host position at resume time
       const resumeTime = Date.now();
@@ -417,240 +649,312 @@ export default function GuestScreen({ onNavigate }: Props) {
 
       const posAfter = player.currentTime;
       const realizedShiftMs = (posAfter - posBefore) * 1000;
-
-    } catch(e) {
+    } catch (e) {
     } finally {
       isSeekingRef.current = false;
     }
   };
 
-
-
   return (
-    <View style={styles.container}>
-      <TouchableOpacity style={styles.backButton} onPress={() => onNavigate('HOME')}>
-        <Text style={styles.backButtonText}>← Back</Text>
+    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+      <TouchableOpacity
+        style={styles.backButton}
+        onPress={() => onNavigate("HOME")}
+      >
+        <Text style={styles.backButtonText}>← BACK</Text>
       </TouchableOpacity>
 
-      <Text style={styles.title}>Join as Guest</Text>
-      
+      <Text style={styles.eyebrow}>HEADPHONES ON · WORLD OFF</Text>
+      <Text style={styles.title}>
+        Join the <Text style={styles.neon}>Party.</Text>
+      </Text>
+      <Text style={styles.subtitle}>Find your DJ. Feel the same beat.</Text>
+
       <View style={styles.card}>
-        <Text style={styles.label}>1. Connect to Host</Text>
+        <Text style={styles.label}>01 / FIND YOUR DJ</Text>
         {!connectedHostId ? (
           <>
-            <Button title={isScanning ? "Scanning..." : "Scan for Hosts"} onPress={handleScan} disabled={isScanning} />
-            <FlatList
-              data={discoveredHosts}
-              keyExtractor={(item) => item.id}
-              renderItem={({ item }) => (
-                <TouchableOpacity style={styles.hostItem} onPress={() => handleConnect(item.id)}>
-                  <Text style={styles.hostName}>{item.name}</Text>
-                  <Text style={styles.hostId}>{item.id}</Text>
+            <TouchableOpacity
+              accessibilityRole="button"
+              style={[styles.scanButton, isScanning && styles.scanning]}
+              onPress={handleScan}
+              disabled={isScanning}
+            >
+              {isScanning && <ActivityIndicator color="#C1FF3D" size="small" />}
+              <Text
+                style={[styles.scanText, isScanning && { color: "#C1FF3D" }]}
+              >
+                {isScanning ? "LOOKING FOR YOUR DJ…" : "SCAN FOR NEARBY DJs"}
+              </Text>
+            </TouchableOpacity>
+            <View style={styles.hostList}>
+              {discoveredHosts.map((item) => (
+                <TouchableOpacity
+                  key={item.id}
+                  accessibilityRole="button"
+                  style={styles.hostItem}
+                  onPress={() => handleConnect(item.id)}
+                >
+                  <Text style={styles.hostName}>
+                    {item.name || "Nearby DJ"}{" "}
+                    <Text style={styles.neon}>↗</Text>
+                  </Text>
+                  <Text style={styles.hostId}>Tap to connect</Text>
                 </TouchableOpacity>
+              ))}
+              {discoveredHosts.length === 0 && (
+                <Text style={styles.searchHint}>
+                  {scanError || "Keep your DJ nearby with Bluetooth turned on."}
+                </Text>
               )}
-              style={styles.hostList}
-            />
+            </View>
           </>
         ) : (
-          <Text style={styles.statusText}>Connected to Host</Text>
+          <Text style={styles.statusText}>✓ Connected to your DJ</Text>
         )}
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.label}>2. Sync Status</Text>
+        <Text style={styles.label}>02 / GET READY</Text>
         {!connectedHostId ? (
-          <Text style={styles.waitingText}>Please connect to a host first.</Text>
+          <Text style={styles.waitingText}>
+            Connect to a DJ to get the music.
+          </Text>
         ) : isDownloading ? (
           <View style={styles.downloadContainer}>
-            <ActivityIndicator size="small" color="#007AFF" />
+            <ActivityIndicator size="small" color="#C1FF3D" />
             <Text style={styles.downloadText}>
-              {downloadProgress > 0 
-                ? `Downloading song from Host... ${downloadProgress.toFixed(0)}%` 
-                : 'Preparing download...'}
+              {downloadProgress > 0
+                ? `Downloading your track… ${downloadProgress.toFixed(0)}%`
+                : "Preparing download..."}
             </Text>
           </View>
         ) : !audioFile ? (
-          <Text style={styles.waitingText}>Waiting for Host to pick a song...</Text>
+          <Text style={styles.waitingText}>
+            Waiting for your DJ to choose a track…
+          </Text>
         ) : (
           <View>
-            <Text style={styles.readyText}>✅ Ready to Play!</Text>
+            <Text style={styles.readyText}>
+              {player.isLoaded ? "✓ Ready to Play!" : "Preparing audio…"}
+            </Text>
             <Text style={styles.fileName}>Loaded: {audioFile.name}</Text>
           </View>
         )}
       </View>
 
+      {joinStatus !== "" && (
+        <TouchableOpacity
+          accessibilityRole="button"
+          disabled={!joinStatus.includes("retry")}
+          style={styles.card}
+          onPress={() => {
+            if (audioFile && player.isLoaded) requestCurrentPlayback();
+            else if (sourceRef.current) {
+              const [, url, ...name] = sourceRef.current.split("|");
+              void downloadSong(url, name.join("|"));
+            }
+          }}
+        >
+          <Text style={styles.waitingText}>{joinStatus}</Text>
+        </TouchableOpacity>
+      )}
+
       <View style={styles.card}>
-        <Text style={styles.label}>3. Beatmatch Controls</Text>
+        <Text style={styles.label}>03 / FINE-TUNE YOUR BEAT</Text>
         <Text style={styles.nudgeHint}>
-          {nudgeSuggestion === 'forward' ? '⚠️ Guest is behind — press >>>' :
-           nudgeSuggestion === 'backward' ? '⚠️ Guest is ahead — press <<<' :
-           nudgeSuggestion === 'synced' ? '✅ In sync!' :
-           'Waiting for sync data...'}
+          {nudgeSuggestion === "forward"
+            ? "⚠️ Guest is behind — press >>>"
+            : nudgeSuggestion === "backward"
+              ? "⚠️ Guest is ahead — press <<<"
+              : nudgeSuggestion === "synced"
+                ? "✅ In sync!"
+                : "Waiting for sync data..."}
         </Text>
-        
+
         <View style={styles.nudgeRow}>
           <TouchableOpacity
-            style={[styles.nudgeButton, { flex: 1, marginRight: 10, alignItems: 'center' },
-              nudgeSuggestion === 'backward' ? { backgroundColor: '#dc3545', borderColor: '#ff6b6b', borderWidth: 2 } :
-              nudgeSuggestion === 'synced' ? { backgroundColor: '#007AFF' } : {}
+            style={[
+              styles.nudgeButton,
+              { flex: 1, marginRight: 10, alignItems: "center" },
+              nudgeSuggestion === "backward"
+                ? {
+                    backgroundColor: "#48203C",
+                    borderColor: "#FF4DD8",
+                    borderWidth: 2,
+                  }
+                : nudgeSuggestion === "synced"
+                  ? { backgroundColor: "#263619" }
+                  : {},
             ]}
-            onPress={() => handleNudge(-1)} disabled={!audioFile}>
+            accessibilityRole="button"
+            accessibilityLabel="Nudge audio backward"
+            onPress={() => handleNudge(-1)}
+            disabled={!audioFile}
+          >
             <Text style={styles.nudgeButtonText}>&lt;&lt;&lt;</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.nudgeButton, { flex: 1, marginLeft: 10, alignItems: 'center' },
-              nudgeSuggestion === 'forward' ? { backgroundColor: '#28a745', borderColor: '#5cb85c', borderWidth: 2 } :
-              nudgeSuggestion === 'synced' ? { backgroundColor: '#007AFF' } : {}
+            style={[
+              styles.nudgeButton,
+              { flex: 1, marginLeft: 10, alignItems: "center" },
+              nudgeSuggestion === "forward"
+                ? {
+                    backgroundColor: "#263619",
+                    borderColor: "#C1FF3D",
+                    borderWidth: 2,
+                  }
+                : nudgeSuggestion === "synced"
+                  ? { backgroundColor: "#263619" }
+                  : {},
             ]}
-            onPress={() => handleNudge(1)} disabled={!audioFile}>
+            accessibilityRole="button"
+            accessibilityLabel="Nudge audio forward"
+            onPress={() => handleNudge(1)}
+            disabled={!audioFile}
+          >
             <Text style={styles.nudgeButtonText}>&gt;&gt;&gt;</Text>
           </TouchableOpacity>
         </View>
       </View>
-      
+
       <View style={styles.card}>
-        <Text style={styles.label}>Debug Logs (Long press to copy)</Text>
-        <TextInput 
-          style={styles.logBoxInput}
-          multiline={true}
-          editable={false}
-          value={debugLogs.length === 0 ? "No logs yet..." : debugLogs.join('\n')}
-        />
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityState={{ expanded: showDiagnostics }}
+          onPress={() => setShowDiagnostics((value) => !value)}
+        >
+          <Text style={styles.detailsLabel}>
+            CONNECTION DETAILS {showDiagnostics ? "−" : "+"}
+          </Text>
+        </TouchableOpacity>
+        {showDiagnostics && (
+          <TextInput
+            style={styles.logBoxInput}
+            multiline={true}
+            editable={false}
+            value={
+              debugLogs.length === 0 ? "No logs yet..." : debugLogs.join("\n")
+            }
+          />
+        )}
       </View>
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    padding: 20,
-  },
+  container: { flex: 1 },
+  content: { padding: 22, paddingBottom: 36 },
   backButton: {
-    marginBottom: 20,
+    alignSelf: "flex-start",
+    paddingVertical: 10,
+    marginBottom: 18,
   },
-  backButtonText: {
-    fontSize: 16,
-    color: '#007AFF',
-  },
-  title: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    marginBottom: 30,
-  },
-  card: {
-    backgroundColor: 'white',
-    padding: 20,
-    borderRadius: 12,
-    marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 2,
-  },
-  label: {
-    fontSize: 18,
-    fontWeight: '600',
+  backButtonText: { fontSize: 12, color: "#A6A7BB", fontWeight: "700" },
+  eyebrow: {
+    color: "#FF4DD8",
+    fontSize: 9,
+    letterSpacing: 2,
     marginBottom: 10,
   },
-  fileName: {
-    marginTop: 10,
-    fontSize: 14,
-    color: '#666',
-    fontStyle: 'italic',
+  title: {
+    fontSize: 36,
+    fontWeight: "900",
+    color: "#F4F5FA",
+    letterSpacing: -1,
   },
-  downloadContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 15,
+  neon: { color: "#C1FF3D" },
+  subtitle: { color: "#9699AF", fontSize: 14, marginTop: 10, marginBottom: 28 },
+  card: {
+    backgroundColor: "#151722",
+    padding: 18,
+    borderRadius: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: "#343349",
   },
-  downloadText: {
-    marginLeft: 10,
-    color: '#007AFF',
-    fontWeight: '500',
+  label: {
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 1.2,
+    color: "#F4F5FA",
+    marginBottom: 16,
   },
-  hostList: {
-    marginTop: 15,
-    maxHeight: 150,
+  scanButton: {
+    backgroundColor: "#C1FF3D",
+    minHeight: 52,
+    borderRadius: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 9,
   },
-  hostItem: {
-    padding: 12,
-    backgroundColor: '#F2F2F7',
-    borderRadius: 8,
-    marginBottom: 8,
+  scanning: {
+    backgroundColor: "#202A19",
+    borderWidth: 1,
+    borderColor: "#4D6630",
   },
-  hostName: {
-    fontWeight: '600',
-    fontSize: 16,
-  },
-  hostId: {
+  scanText: {
+    color: "#111707",
+    fontWeight: "800",
     fontSize: 12,
-    color: '#666',
-    marginTop: 2,
+    letterSpacing: 0.5,
   },
-  statusText: {
-    color: '#34C759',
-    fontWeight: '600',
-    marginTop: 10,
+  searchHint: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: "#9296AA",
+    textAlign: "center",
+    paddingTop: 4,
   },
-  waitingText: {
-    color: '#FF9500',
-    fontWeight: '500',
-    marginTop: 5,
-    fontStyle: 'italic',
+  hostList: { marginTop: 14 },
+  hostItem: {
+    padding: 14,
+    backgroundColor: "#202332",
+    borderWidth: 1,
+    borderColor: "#48425A",
+    borderRadius: 9,
+    marginBottom: 9,
   },
-  readyText: {
-    color: '#34C759',
-    fontWeight: 'bold',
-    fontSize: 16,
-    marginTop: 5,
-  },
+  hostName: { fontWeight: "700", fontSize: 16, color: "#F0F1F9" },
+  hostId: { fontSize: 11, color: "#A2A6BB", marginTop: 6 },
+  fileName: { marginTop: 10, fontSize: 13, color: "#C0C4D7" },
+  downloadContainer: { flexDirection: "row", alignItems: "center", gap: 10 },
+  downloadText: { color: "#C1FF3D", fontSize: 13, flex: 1 },
+  statusText: { color: "#C1FF3D", fontWeight: "600" },
+  waitingText: { color: "#A4A8BF", fontSize: 13, lineHeight: 20 },
+  readyText: { color: "#C1FF3D", fontWeight: "800", fontSize: 18 },
   nudgeHint: {
     fontSize: 12,
-    color: '#999',
-    marginBottom: 15,
+    color: "#A4A8BF",
+    marginBottom: 16,
+    lineHeight: 18,
   },
-  nudgeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
+  nudgeRow: { flexDirection: "row", justifyContent: "space-between" },
   nudgeButton: {
-    backgroundColor: '#E5E5EA',
-    paddingVertical: 10,
+    backgroundColor: "#252738",
+    paddingVertical: 14,
     paddingHorizontal: 12,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#48445C",
   },
-  nudgeButtonText: {
-    fontWeight: '600',
-    color: '#333',
-  },
-  syncRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginTop: 15,
-    paddingTop: 15,
-    borderTopWidth: 1,
-    borderTopColor: '#EEE',
-  },
-  syncButton: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-  },
-  syncButtonText: {
-    fontWeight: '600',
-    color: '#FFF',
-    fontSize: 16,
+  nudgeButtonText: { fontWeight: "800", color: "#DBDDF0" },
+  detailsLabel: {
+    fontSize: 10,
+    letterSpacing: 1,
+    color: "#9195AD",
+    fontWeight: "700",
   },
   logBoxInput: {
-    backgroundColor: '#1E1E1E',
-    padding: 10,
+    backgroundColor: "#090D10",
+    padding: 12,
     borderRadius: 8,
     minHeight: 120,
-    color: '#00FF00',
+    color: "#B4DB83",
     fontSize: 11,
-    fontFamily: 'Courier',
-  }
+    fontFamily: "Courier",
+    marginTop: 14,
+  },
 });

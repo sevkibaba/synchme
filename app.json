@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "synchme",
+    "name": "SILENT CLUB",
     "slug": "synchme",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -59,7 +59,7 @@
             "connect",
             "advertise"
           ],
-          "bluetoothAlwaysUsageDescription": "Allow SynchMe to connect to nearby devices to sync audio playback."
+          "bluetoothAlwaysUsageDescription": "Allow SILENT CLUB to connect to nearby devices to sync audio playback."
         }
       ],
       "expo-build-properties",

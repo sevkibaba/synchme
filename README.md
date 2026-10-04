@@ -57,3 +57,18 @@ npm test
 
 
 npx expo run:ios --device --configuration Release
+
+## Joining a party already in progress
+
+With the updated DJ and listener apps, a listener can connect over Bluetooth,
+download the current track, wait for the native player to load, and request the
+DJ's current playback position. The listener starts there automatically if the
+DJ is playing, or stays paused if the DJ is paused. No new group-wide Play is sent.
+Replies carry a request ID and track identity so other listeners ignore them.
+Missing replies retry up to five times; the screen then offers a manual retry.
+A new track or pause cancels an outstanding scheduled start.
+
+The existing Firebase transfer still needs internet access to download a track.
+This is current-track catch-up, not full-set-list distribution. Bluetooth timing
+and multiple-device capacity must be validated on physical phones; simulator
+checks and automated tests cannot establish real radio/audio performance.

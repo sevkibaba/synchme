@@ -51,6 +51,7 @@ jest.mock('munim-bluetooth', () => {
       };
     }),
     requestBluetoothPermission: jest.fn(() => Promise.resolve(true)),
+    isBluetoothEnabled: jest.fn(() => Promise.resolve(true)),
     getBluetoothStateAsync: jest.fn(() => Promise.resolve('PoweredOn')),
     setServices: jest.fn(() => Promise.resolve()),
     startAdvertising: jest.fn(() => Promise.resolve()),

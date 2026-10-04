@@ -1,78 +1,99 @@
-import React from 'react';
-import { StyleSheet, View, Text, TouchableOpacity } from 'react-native';
-import { ScreenType } from '../../App';
+import React from "react";
+import {
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  ScrollView,
+  View,
+} from "react-native";
+import { ScreenType } from "../../App";
+import AnimatedPartyLogo from "../components/AnimatedPartyLogo";
 
-interface Props {
+export default function Home({
+  onNavigate,
+}: {
   onNavigate: (screen: ScreenType) => void;
-}
-
-export default function Home({ onNavigate }: Props) {
+}) {
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>SynchMe</Text>
-      <Text style={styles.subtitle}>Synchronized Audio Playback</Text>
-
-      <View style={styles.buttonContainer}>
+    <View style={s.screen}>
+      <ScrollView contentContainerStyle={s.container}>
+        <AnimatedPartyLogo />
+        <Text style={s.eyebrow}>ONE BEAT. ALL OF US.</Text>
+        <Text style={s.title}>
+          NO NOISE.{"\n"}
+          <Text style={{ color: "#C1FF3D" }}>MORE PARTY.</Text>
+        </Text>
+        <Text style={s.subtitle}>Headphones on. One shared beat.</Text>
         <TouchableOpacity
-          style={[styles.button, styles.hostButton]}
-          onPress={() => onNavigate('HOST')}
+          accessibilityRole="button"
+          style={s.primary}
+          onPress={() => onNavigate("HOST")}
         >
-          <Text style={styles.buttonText}>Host a Session</Text>
+          <Text style={s.primaryText}>LET’S PARTY ↗</Text>
+          <Text style={s.primaryHint}>Be the DJ · Build your set</Text>
         </TouchableOpacity>
-
         <TouchableOpacity
-          style={[styles.button, styles.guestButton]}
-          onPress={() => onNavigate('GUEST')}
+          accessibilityRole="button"
+          style={s.secondary}
+          onPress={() => onNavigate("GUEST")}
         >
-          <Text style={styles.buttonText}>Join as Guest</Text>
+          <Text style={s.secondaryText}>JOIN THE PARTY →</Text>
         </TouchableOpacity>
-      </View>
+        <Text style={s.footer}>
+          CONNECT VIA BLUETOOTH · LISTEN ON HEADPHONES
+        </Text>
+      </ScrollView>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
+const s = StyleSheet.create({
+  screen: { flex: 1 },
   container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
+    flexGrow: 1,
+    padding: 26,
+    justifyContent: "center",
+  },
+  eyebrow: {
+    fontSize: 10,
+    color: "#A6A7BB",
+    letterSpacing: 3,
+    marginBottom: 12,
   },
   title: {
-    fontSize: 48,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 10,
+    fontSize: 43,
+    lineHeight: 49,
+    fontWeight: "900",
+    color: "#F4F5FA",
+    letterSpacing: -2,
   },
-  subtitle: {
-    fontSize: 18,
-    color: '#666',
-    marginBottom: 60,
+  subtitle: { color: "#9899AF", fontSize: 15, marginTop: 14, marginBottom: 30 },
+  primary: { backgroundColor: "#C1FF3D", padding: 21, borderRadius: 16 },
+  primaryText: {
+    color: "#101507",
+    fontWeight: "900",
+    fontSize: 23,
+    letterSpacing: 1,
   },
-  buttonContainer: {
-    width: '100%',
-    gap: 20,
+  primaryHint: { color: "#354710", marginTop: 5, fontSize: 12 },
+  secondary: {
+    borderWidth: 1,
+    borderColor: "#454159",
+    padding: 19,
+    borderRadius: 16,
+    marginTop: 12,
+    alignItems: "center",
   },
-  button: {
-    paddingVertical: 18,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
+  secondaryText: {
+    color: "#F4F5FA",
+    fontSize: 14,
+    fontWeight: "700",
+    letterSpacing: 1,
   },
-  hostButton: {
-    backgroundColor: '#007AFF',
-  },
-  guestButton: {
-    backgroundColor: '#34C759',
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 18,
-    fontWeight: '600',
+  footer: {
+    color: "#74768C",
+    textAlign: "center",
+    fontSize: 9,
+    letterSpacing: 1.3,
+    marginTop: 24,
   },
 });
